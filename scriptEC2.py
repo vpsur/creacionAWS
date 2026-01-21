@@ -2,7 +2,7 @@ import boto3
 from dotenv import load_dotenv
 from botocore.exceptions import ClientError
 import os
-
+import time
 
 load_dotenv()
 
@@ -14,10 +14,11 @@ def conectarse():
     region_name=os.getenv("REGION"))
 
     ec2 = session.client('ec2')
+    efs = session.client('efs')
 
     response = ec2.describe_instances()
     print(response)
-    return ec2
+    return ec2, efs
 
 def crear_instanciaEC2(ec2):
     INSTANCE_NAME = os.getenv("EC2_INSTANCE_NAME")
@@ -81,6 +82,7 @@ def crearEBS(ec2, instance_id):
 
     size_gb=10
     device_name='/dev/sdf'
+    
     #Crear el volumen EBS en la misma zona que la instancia
     instance_desc = ec2.describe_instances(InstanceIds=[instance_id])
     availability_zone = instance_desc['Reservations'][0]['Instances'][0]['Placement']['AvailabilityZone']
@@ -91,7 +93,7 @@ def crearEBS(ec2, instance_id):
         VolumeType='gp3',
         TagSpecifications=[{
             'ResourceType': 'volume',
-            'Tags': [{'Key': 'Name', 'Value': f'Vol-{instance_id}'}]
+            'Tags': [{'Key': 'Name', 'Value': f'Volu-{instance_id}'}]
         }]
     )
     volume_id = volume['VolumeId']
@@ -136,13 +138,74 @@ def crearEBS(ec2, instance_id):
     os.system(cmd_scp)
     print(f"Archivo {archivo_local} copiado a {mount_point}")
 
+def crearEFS(ec2, instance_id, efs):
+    #Crear instancia
+    try:
+        response = efs.create_file_system(
+            CreationToken=f"efs-{instance_id}",
+            Tags=[{'Key': 'Name', 'Value': 'MiEFS'}]
+        )
+        fs_id = response['FileSystemId']
+        print(f"Éxito: Se ha creado el EFS con ID {fs_id}")
+    except efs.exceptions.FileSystemAlreadyExists:
+        # Si ya existe, simplemente lo buscamos para obtener su ID
+        response = efs.describe_file_systems(CreationToken=f"efs-{instance_id}")
+        fs_id = response['FileSystems'][0]['FileSystemId']
+        print(f"El EFS ya existía: {fs_id}")
+
+    #Crear datos desde la instancia
+    instance = ec2.describe_instances(InstanceIds=[instance_id])
+    instance = instance['Reservations'][0]['Instances'][0]
+
+    subnet_id = instance['SubnetId']
+    security_group_id = instance['SecurityGroups'][0]['GroupId']
+
+    while True:
+        desc = efs.describe_file_systems(FileSystemId=fs_id)
+        if desc['FileSystems'][0]['LifeCycleState'] == 'available':
+            break
+        time.sleep(5)
+
+    efs_dns = f"{fs_id}.efs.{os.getenv("REGION")}.amazonaws.com"
+
+    efs.create_mount_target(
+    FileSystemId=fs_id,
+    SubnetId=subnet_id,
+    SecurityGroups=[security_group_id]
+    )
+
+    print("Mount target creado")
+
+    instance_ip = instance['PublicIpAddress']
+    key_path = os.getenv("key_path")
+    mount_point = "/mnt/efs"
+
+    print("Vamo a mirarlo")
+    print(fs_id)
+    cmd_mount = f"""
+        ssh -o StrictHostKeyChecking=no -i {key_path} ec2-user@{instance_ip} \\
+        'sudo yum install -y amazon-efs-utils && \
+        sudo mkdir -p {mount_point} && \
+        sudo mount -t efs {fs_id}:/ {mount_point} && \
+        sudo chown -R ec2-user:ec2-user {mount_point}'
+    """
+    os.system(cmd_mount)
+
+    print("EFS montado")
+
+    archivo_local = "archivo.txt"
+    cmd_scp = f"scp -i {key_path} {archivo_local} ec2-user@{instance_ip}:{mount_point}/"
+    os.system(cmd_scp)
+
+    print(f"Archivo {archivo_local} copiado a {mount_point}")
+
 def main():
-    ec2=conectarse()
+    ec2, efs =conectarse()
     instance_id = crear_instanciaEC2(ec2)
     #pararinstancia(ec2, instance_id)
     #eliminarinstancia(ec2, instance_id)
-    crearEBS(ec2, instance_id)
-    #crearEFS
+    #crearEBS(ec2, instance_id)
+    crearEFS(ec2, instance_id, efs)
 
 
 
