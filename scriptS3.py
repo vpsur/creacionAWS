@@ -32,7 +32,7 @@ def bucket_standard(s3):
     #Crear Carpetas
     carpetas = [
         "datos/",
-        "datos/ventas/"
+        "datos/ventas/",
         "resultado/"
     ]
 
@@ -243,6 +243,165 @@ def versionado(s3):
             f"VersionId: {v['VersionId']} | "
             f"IsLatest: {v['IsLatest']}"
         )
+
+def athena():
+    athena = boto3.client(
+        "athena",
+        aws_access_key_id=os.getenv("ACCESS_KEY"),
+        aws_secret_access_key=os.getenv("SECRET_KEY"),
+        aws_session_token=os.getenv("SESSION_TOKEN"),
+        region_name=os.getenv("REGION")
+    )
+    return athena
+
+
+def crearbaseAthena(athe):
+    query = """
+    CREATE DATABASE ventas_db
+    """
+
+    response = athe.start_query_execution(
+        QueryString=query,
+        ResultConfiguration={
+            "OutputLocation": "s3://bucketstandard685/resultados/"
+        }
+    )
+
+    print("Query enviada:", response["QueryExecutionId"])
+
+    query = """
+        CREATE EXTERNAL TABLE ventas_db.ventas (
+        id INT,
+        producto STRING,
+        cantidad INT,
+        precio INT
+        )
+        ROW FORMAT DELIMITED
+        FIELDS TERMINATED BY ','
+        STORED AS TEXTFILE
+        LOCATION 's3://bucketstandard685/datos/ventas/'
+        TBLPROPERTIES ('skip.header.line.count'='1')
+    """
+
+    athe.start_query_execution(
+        QueryString=query,
+        ResultConfiguration={
+            "OutputLocation": "s3://bucketstandard685/resultados/"
+        }
+    )
+
+def consultAthena(athe):
+    queries = [
+        "SELECT * FROM ventas_db.ventas",
+
+        "SELECT producto, SUM(cantidad) AS total_vendido FROM ventas_db.ventas GROUP BY producto",
+
+        "SELECT AVG(precio) AS precio_promedio FROM ventas_db.ventas"
+    ]
+
+    for query in queries:
+
+        response = athe.start_query_execution(
+            QueryString=query,
+            QueryExecutionContext={
+                "Database": "ventas_db"
+            },
+            ResultConfiguration={
+                "OutputLocation": "s3://bucketstandard685/resultados/"
+            }
+        )
+
+        print("Consulta enviada:", response["QueryExecutionId"])
+
+def subirJson(s3):
+    s3.upload_file(
+        Filename="ventas.json",
+        Bucket="bucketstandard685",
+        Key="datos/productos/ventas.json"
+    )
+    print("Archivo JSON subido correctamente")
+
+def consultasJSON(athe):
+    query_db = "CREATE DATABASE IF NOT EXISTS productos_db"
+    athe.start_query_execution(
+        QueryString=query_db,
+        ResultConfiguration={
+            "OutputLocation": "s3://bucketstandard685/resultados/"
+        }
+    )
+
+    # Crear tabla JSON
+    query_table = """
+    CREATE EXTERNAL TABLE IF NOT EXISTS productos_db.productos (
+        id INT,
+        producto STRING,
+        precio INT
+    )
+    ROW FORMAT SERDE 'org.openx.data.jsonserde.JsonSerDe'
+    LOCATION 's3://bucketstandard685/productos/'
+    """
+    athe.start_query_execution(
+        QueryString=query_table,
+        ResultConfiguration={
+            "OutputLocation": "s3://bucketstandard685/resultados/"
+        }
+    )
+
+    # Lista de consultas
+    queries = [
+        "SELECT * FROM productos_db.productos",
+        "SELECT producto FROM productos_db.productos WHERE precio > 30",
+        "SELECT AVG(precio) FROM productos_db.productos"
+    ]
+
+    for q in queries:
+        response = athe.start_query_execution(
+            QueryString=q,
+            QueryExecutionContext={"Database": "productos_db"},
+            ResultConfiguration={"OutputLocation": "s3://bucketjson685/resultados/"}
+        )
+        print("Consulta JSON enviada:", response["QueryExecutionId"])
+
+def consultaparticionada(athe):
+    result_location = "s3://bucketstandard685/resultados/"
+    query_table = """
+        CREATE EXTERNAL TABLE IF NOT EXISTS ventas_db.ventas_partition (
+            id INT,
+            producto STRING,
+            cantidad INT,
+            precio INT
+        )
+        PARTITIONED BY (year INT)
+        ROW FORMAT DELIMITED
+        FIELDS TERMINATED BY ','
+        LOCATION 's3://bucketstandard685/ventas_partition/'
+        TBLPROPERTIES ('skip.header.line.count'='1')
+    """
+    athe.start_query_execution(
+        QueryString=query_table,
+        ResultConfiguration={"OutputLocation": result_location}
+    )
+    print("Tabla particionada creada")
+
+    partitions = [
+        (2023, "s3://bucketstandard685/ventas_partition/year=2023/"),
+        (2024, "s3://bucketstandard685/ventas_partition/year=2024/")
+    ]
+    for year, location in partitions:
+        athe.start_query_execution(
+            QueryString=f"ALTER TABLE ventas_db.ventas_partition ADD PARTITION (year={year}) LOCATION '{location}'",
+            ResultConfiguration={"OutputLocation": result_location}
+        )
+        print(f"Partición {year} añadida")
+
+    query = "SELECT * FROM ventas_db.ventas_partition WHERE year=2024"
+    response = athe.start_query_execution(
+        QueryString=query,
+        QueryExecutionContext={"Database": "ventas_db"},
+        ResultConfiguration={"OutputLocation": result_location}
+    )
+    print("Consulta sobre partición enviada, QueryExecutionId:", response["QueryExecutionId"])
+
 def main():
     s3 = conectarse()
     #bucket_standard(s3)
@@ -252,7 +411,13 @@ def main():
     #descargar_desde_Glacier(s3)
     #bucket_deep_archive(s3)
     #descargar_desde_Glacier_deep(s3)
-    versionado(s3)
+    #versionado(s3)
+    athe = athena()
+    #crearbaseAthena(athe)
+    #consultAthena(athe)
+    #subirJson(s3)
+    #consultasJSON(athe)
+    consultaparticionada(athe)
 
 
 if __name__ == "__main__":
